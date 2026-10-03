@@ -1,54 +1,324 @@
-"""Command-line interface for the Library Management System."""
-from library.database import connect
-from library import Library, LibraryError
+import sqlite3
+from datetime import datetime, timedelta
 
-MENU = """
-===== Library Management System =====
-1. Add book        4. Search books
-2. Add member      5. Issue book
-3. List issued     6. Return book
-0. Exit
-"""
+# ─────────────────────────────────────────
+#  DATABASE SETUP
+# ─────────────────────────────────────────
 
-def ask_int(prompt):
-    while True:
-        try:
-            return int(input(prompt))
-        except ValueError:
-            print("Please enter a number.")
+def init_db():
+    conn = sqlite3.connect("library.db")
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS books (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            title    TEXT NOT NULL,
+            author   TEXT NOT NULL,
+            copies   INTEGER DEFAULT 1
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS members (
+            id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            name  TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS transactions (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            book_id     INTEGER,
+            member_id   INTEGER,
+            issue_date  TEXT,
+            return_date TEXT,
+            returned    INTEGER DEFAULT 0,
+            FOREIGN KEY (book_id)   REFERENCES books(id),
+            FOREIGN KEY (member_id) REFERENCES members(id)
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def get_conn():
+    return sqlite3.connect("library.db")
+
+
+# ─────────────────────────────────────────
+#  BOOK FUNCTIONS
+# ─────────────────────────────────────────
+
+def add_book():
+    title  = input("  Book Title  : ").strip()
+    author = input("  Author Name : ").strip()
+    copies = input("  No. of Copies (default 1): ").strip()
+    copies = int(copies) if copies.isdigit() else 1
+
+    conn = get_conn()
+    conn.execute("INSERT INTO books (title, author, copies) VALUES (?, ?, ?)", (title, author, copies))
+    conn.commit()
+    conn.close()
+    print(f"\n  ✅ '{title}' added successfully!\n")
+
+
+def view_books():
+    conn = get_conn()
+    books = conn.execute("SELECT * FROM books").fetchall()
+    conn.close()
+
+    if not books:
+        print("\n  📭 No books in library yet.\n")
+        return
+
+    print("\n  {:>4}  {:<30} {:<20} {:>6}".format("ID", "Title", "Author", "Copies"))
+    print("  " + "-" * 65)
+    for b in books:
+        print("  {:>4}  {:<30} {:<20} {:>6}".format(b[0], b[1][:29], b[2][:19], b[3]))
+    print()
+
+
+def search_book():
+    keyword = input("  Search by title or author: ").strip().lower()
+    conn = get_conn()
+    books = conn.execute(
+        "SELECT * FROM books WHERE LOWER(title) LIKE ? OR LOWER(author) LIKE ?",
+        (f"%{keyword}%", f"%{keyword}%")
+    ).fetchall()
+    conn.close()
+
+    if not books:
+        print("\n  ❌ No matching books found.\n")
+        return
+
+    print("\n  {:>4}  {:<30} {:<20} {:>6}".format("ID", "Title", "Author", "Copies"))
+    print("  " + "-" * 65)
+    for b in books:
+        print("  {:>4}  {:<30} {:<20} {:>6}".format(b[0], b[1][:29], b[2][:19], b[3]))
+    print()
+
+
+# ─────────────────────────────────────────
+#  MEMBER FUNCTIONS
+# ─────────────────────────────────────────
+
+def add_member():
+    name  = input("  Member Name  : ").strip()
+    email = input("  Member Email : ").strip()
+
+    conn = get_conn()
+    try:
+        conn.execute("INSERT INTO members (name, email) VALUES (?, ?)", (name, email))
+        conn.commit()
+        print(f"\n  ✅ Member '{name}' registered!\n")
+    except sqlite3.IntegrityError:
+        print("\n  ⚠️  Email already registered.\n")
+    finally:
+        conn.close()
+
+
+def view_members():
+    conn = get_conn()
+    members = conn.execute("SELECT * FROM members").fetchall()
+    conn.close()
+
+    if not members:
+        print("\n  📭 No members registered yet.\n")
+        return
+
+    print("\n  {:>4}  {:<25} {:<30}".format("ID", "Name", "Email"))
+    print("  " + "-" * 62)
+    for m in members:
+        print("  {:>4}  {:<25} {:<30}".format(m[0], m[1][:24], m[2][:29]))
+    print()
+
+
+# ─────────────────────────────────────────
+#  ISSUE & RETURN
+# ─────────────────────────────────────────
+
+def issue_book():
+    view_books()
+    book_id   = input("  Enter Book ID to issue   : ").strip()
+    view_members()
+    member_id = input("  Enter Member ID           : ").strip()
+
+    conn = get_conn()
+
+    # Check book exists and has copies
+    book = conn.execute("SELECT * FROM books WHERE id = ?", (book_id,)).fetchone()
+    if not book:
+        print("\n  ❌ Book not found.\n")
+        conn.close()
+        return
+    if book[3] < 1:
+        print("\n  ❌ No copies available right now.\n")
+        conn.close()
+        return
+
+    # Check member exists
+    member = conn.execute("SELECT * FROM members WHERE id = ?", (member_id,)).fetchone()
+    if not member:
+        print("\n  ❌ Member not found.\n")
+        conn.close()
+        return
+
+    # Check if member already has this book
+    active = conn.execute(
+        "SELECT * FROM transactions WHERE book_id=? AND member_id=? AND returned=0",
+        (book_id, member_id)
+    ).fetchone()
+    if active:
+        print("\n  ⚠️  This member already has this book issued.\n")
+        conn.close()
+        return
+
+    issue_date  = datetime.now().strftime("%Y-%m-%d")
+    return_date = (datetime.now() + timedelta(days=14)).strftime("%Y-%m-%d")
+
+    conn.execute(
+        "INSERT INTO transactions (book_id, member_id, issue_date, return_date) VALUES (?, ?, ?, ?)",
+        (book_id, member_id, issue_date, return_date)
+    )
+    conn.execute("UPDATE books SET copies = copies - 1 WHERE id = ?", (book_id,))
+    conn.commit()
+    conn.close()
+
+    print(f"\n  ✅ '{book[1]}' issued to {member[1]}")
+    print(f"     Due Date: {return_date} (14 days)\n")
+
+
+def return_book():
+    member_id = input("  Enter Member ID : ").strip()
+
+    conn = get_conn()
+    issued = conn.execute("""
+        SELECT t.id, b.title, t.return_date
+        FROM transactions t
+        JOIN books b ON t.book_id = b.id
+        WHERE t.member_id = ? AND t.returned = 0
+    """, (member_id,)).fetchall()
+
+    if not issued:
+        print("\n  📭 No active issues for this member.\n")
+        conn.close()
+        return
+
+    print("\n  Active Issues:")
+    print("  {:>4}  {:<30}  {:<12}".format("TXN", "Title", "Due Date"))
+    print("  " + "-" * 50)
+    for row in issued:
+        print("  {:>4}  {:<30}  {:<12}".format(row[0], row[1][:29], row[2]))
+
+    txn_id = input("\n  Enter Transaction ID to return: ").strip()
+    txn = conn.execute("SELECT * FROM transactions WHERE id = ?", (txn_id,)).fetchone()
+
+    if not txn:
+        print("\n  ❌ Transaction not found.\n")
+        conn.close()
+        return
+
+    today      = datetime.now().date()
+    due_date   = datetime.strptime(txn[4], "%Y-%m-%d").date()
+    fine       = 0
+
+    if today > due_date:
+        overdue_days = (today - due_date).days
+        fine = overdue_days * 2
+        print(f"\n  ⚠️  Book is {overdue_days} day(s) overdue.")
+        print(f"     Fine: ₹{fine} (₹2/day)\n")
+    else:
+        print("\n  ✅ Book returned on time. No fine.\n")
+
+    conn.execute("UPDATE transactions SET returned = 1 WHERE id = ?", (txn_id,))
+    conn.execute("UPDATE books SET copies = copies + 1 WHERE id = ?", (txn[1],))
+    conn.commit()
+    conn.close()
+
+
+# ─────────────────────────────────────────
+#  REPORTS
+# ─────────────────────────────────────────
+
+def show_report():
+    conn = get_conn()
+
+    total_books   = conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+    total_members = conn.execute("SELECT COUNT(*) FROM members").fetchone()[0]
+    total_issued  = conn.execute("SELECT COUNT(*) FROM transactions WHERE returned=0").fetchone()[0]
+    total_returned= conn.execute("SELECT COUNT(*) FROM transactions WHERE returned=1").fetchone()[0]
+
+    print("\n  ╔══════════════════════════════╗")
+    print("  ║       📊 LIBRARY REPORT      ║")
+    print("  ╠══════════════════════════════╣")
+    print(f"  ║  Total Book Titles  : {total_books:<6} ║")
+    print(f"  ║  Total Members      : {total_members:<6} ║")
+    print(f"  ║  Currently Issued   : {total_issued:<6} ║")
+    print(f"  ║  Total Returned     : {total_returned:<6} ║")
+    print("  ╚══════════════════════════════╝\n")
+
+    # Overdue books
+    today = datetime.now().strftime("%Y-%m-%d")
+    overdue = conn.execute("""
+        SELECT m.name, b.title, t.return_date
+        FROM transactions t
+        JOIN members m ON t.member_id = m.id
+        JOIN books   b ON t.book_id   = b.id
+        WHERE t.returned = 0 AND t.return_date < ?
+    """, (today,)).fetchall()
+
+    if overdue:
+        print("  ⚠️  Overdue Books:")
+        print("  {:<20} {:<25} {:<12}".format("Member", "Book", "Due Date"))
+        print("  " + "-" * 58)
+        for row in overdue:
+            print("  {:<20} {:<25} {:<12}".format(row[0][:19], row[1][:24], row[2]))
+        print()
+
+    conn.close()
+
+
+# ─────────────────────────────────────────
+#  MAIN MENU
+# ─────────────────────────────────────────
 
 def main():
-    lib = Library(connect())
+    init_db()
+
+    menus = {
+        "1": ("📚 Add Book",       add_book),
+        "2": ("📋 View All Books", view_books),
+        "3": ("🔍 Search Book",    search_book),
+        "4": ("👤 Add Member",     add_member),
+        "5": ("👥 View Members",   view_members),
+        "6": ("📤 Issue Book",     issue_book),
+        "7": ("📥 Return Book",    return_book),
+        "8": ("📊 Library Report", show_report),
+        "0": ("🚪 Exit",           None),
+    }
+
     while True:
-        print(MENU)
-        choice = input("Choose: ").strip()
-        try:
-            if choice == "1":
-                bid = lib.add_book(input("Title: "), input("Author: "), ask_int("Copies: "))
-                print(f"Book added with ID {bid}.")
-            elif choice == "2":
-                mid = lib.add_member(input("Name: "), input("Email: "))
-                print(f"Member added with ID {mid}.")
-            elif choice == "3":
-                for r in lib.issued_books():
-                    print(f"Book {r['book_id']} '{r['title']}' -> {r['name']}, due {r['due_date']}")
-            elif choice == "4":
-                for b in lib.search_books(input("Keyword: ")):
-                    print(f"{b['id']}: {b['title']} by {b['author']} "
-                          f"({lib.available_copies(b['id'])}/{b['copies']} available)")
-            elif choice == "5":
-                due = lib.issue_book(ask_int("Book ID: "), ask_int("Member ID: "))
-                print(f"Issued. Due on {due}.")
-            elif choice == "6":
-                fine = lib.return_book(ask_int("Book ID: "), ask_int("Member ID: "))
-                print(f"Returned. Fine: Rs {fine}")
-            elif choice == "0":
-                print("Goodbye!")
-                break
-            else:
-                print("Invalid choice.")
-        except LibraryError as e:
-            print(f"Error: {e}")
+        print("  ╔══════════════════════════════════╗")
+        print("  ║    📖 LIBRARY MANAGEMENT SYSTEM  ║")
+        print("  ╠══════════════════════════════════╣")
+        for key, (label, _) in menus.items():
+            print(f"  ║  [{key}] {label:<28} ║")
+        print("  ╚══════════════════════════════════╝")
+        print("  Enter choice: ", end="")
+
+        choice = input().strip()
+
+        if choice == "0":
+            print("\n  👋 Goodbye!\n")
+            break
+        elif choice in menus:
+            print()
+            menus[choice][1]()
+        else:
+            print("\n  ❌ Invalid option. Try again.\n")
+
 
 if __name__ == "__main__":
     main()
