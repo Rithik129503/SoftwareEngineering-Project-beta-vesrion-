@@ -1,0 +1,54 @@
+"""Command-line interface for the Library Management System."""
+from library.database import connect
+from library import Library, LibraryError
+
+MENU = """
+===== Library Management System =====
+1. Add book        4. Search books
+2. Add member      5. Issue book
+3. List issued     6. Return book
+0. Exit
+"""
+
+def ask_int(prompt):
+    while True:
+        try:
+            return int(input(prompt))
+        except ValueError:
+            print("Please enter a number.")
+
+def main():
+    lib = Library(connect())
+    while True:
+        print(MENU)
+        choice = input("Choose: ").strip()
+        try:
+            if choice == "1":
+                bid = lib.add_book(input("Title: "), input("Author: "), ask_int("Copies: "))
+                print(f"Book added with ID {bid}.")
+            elif choice == "2":
+                mid = lib.add_member(input("Name: "), input("Email: "))
+                print(f"Member added with ID {mid}.")
+            elif choice == "3":
+                for r in lib.issued_books():
+                    print(f"Book {r['book_id']} '{r['title']}' -> {r['name']}, due {r['due_date']}")
+            elif choice == "4":
+                for b in lib.search_books(input("Keyword: ")):
+                    print(f"{b['id']}: {b['title']} by {b['author']} "
+                          f"({lib.available_copies(b['id'])}/{b['copies']} available)")
+            elif choice == "5":
+                due = lib.issue_book(ask_int("Book ID: "), ask_int("Member ID: "))
+                print(f"Issued. Due on {due}.")
+            elif choice == "6":
+                fine = lib.return_book(ask_int("Book ID: "), ask_int("Member ID: "))
+                print(f"Returned. Fine: Rs {fine}")
+            elif choice == "0":
+                print("Goodbye!")
+                break
+            else:
+                print("Invalid choice.")
+        except LibraryError as e:
+            print(f"Error: {e}")
+
+if __name__ == "__main__":
+    main()
